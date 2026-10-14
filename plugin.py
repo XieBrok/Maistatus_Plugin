@@ -9,8 +9,8 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any
 
-from maibot_sdk import MaiBotPlugin, Command, Tool, PluginConfigBase, Field
-from maibot_sdk.types import ToolParameterInfo, ToolParamType
+from maibot_sdk import MaiBotPlugin, Command, Tool, PluginConfigBase, Field, HookHandler
+from maibot_sdk.types import HookMode, HookOrder, ToolParameterInfo, ToolParamType
 
 
 class PluginSection(PluginConfigBase):
@@ -37,6 +37,8 @@ class LifeLinkSection(PluginConfigBase):
     proactive_only_context: bool = Field(default=True, description="状态上下文仅用于 Mai_life 主动开聊，不主动用于普通被动回复")
     context_cooldown_seconds: int = Field(default=900, description="主动状态查询最小间隔秒数，建议 900")
     max_context_age_hours: int = Field(default=24, description="状态有效时间窗口（小时），过期状态不应视为当前事实")
+    auto_inject_planner: bool = Field(default=True, description="在 Mai_life 主动任务的 Planner 阶段自动拉取并注入状态")
+    inject_only_owner: bool = Field(default=True, description="无法确认主人身份时不注入状态上下文")
 
 
 class Config(PluginConfigBase):
@@ -102,6 +104,7 @@ class MaiStatusPlugin(MaiBotPlugin):
     def __init__(self) -> None:
         super().__init__()
         self._last_linked_context_at = 0.0
+        self._last_linked_context_by_session: dict[str, float] = {}
 
     async def on_load(self) -> None:
         self.ctx.logger.info("MaiStatus 插件已加载（Mai_life 联动可按配置启用）")
@@ -264,6 +267,100 @@ class MaiStatusPlugin(MaiBotPlugin):
         except Exception as exc:
             self.ctx.logger.warning("MaiStatus Planner context query failed: %s", exc)
             return {"content": "状态上下文暂时不可用：" + safe(exc, 180)}
+
+
+    @staticmethod
+    def _append_context(kwargs: dict[str, Any], note: str) -> bool:
+        """Append context to MaiBot planner payloads (legacy messages or Item-first)."""
+        items = kwargs.get("items")
+        if isinstance(items, list):
+            for item in reversed(items):
+                if not isinstance(item, dict) or item.get("item_type") != "SystemMessageItem":
+                    continue
+                parts = item.get("parts")
+                if not isinstance(parts, list):
+                    item["parts"] = [{"type": "text", "text": note}]
+                    return True
+                if parts and isinstance(parts[-1], dict) and parts[-1].get("type") == "text":
+                    parts[-1]["text"] = str(parts[-1].get("text") or "") + "\n\n" + note
+                else:
+                    parts.append({"type": "text", "text": note})
+                return True
+            from datetime import datetime
+            import uuid
+            items.insert(0, {
+                "item_type": "SystemMessageItem",
+                "meta": {"item_id": f"maistatus-{uuid.uuid4().hex}", "logical_turn_id": None,
+                         "timestamp": datetime.now().isoformat()},
+                "parts": [{"type": "text", "text": note}],
+            })
+            return True
+        messages = kwargs.get("messages")
+        if isinstance(messages, list):
+            for item in messages:
+                if isinstance(item, dict) and str(item.get("role") or "").lower() == "system" and isinstance(item.get("content"), str):
+                    item["content"] += "\n\n" + note
+                    return True
+            messages.insert(0, {"role": "system", "content": note})
+            return True
+        return False
+
+    @HookHandler("maisaka.planner.before_request", mode=HookMode.BLOCKING, order=HookOrder.LATE, timeout_ms=12000)
+    async def on_planner_before_request(self, **kwargs: Any) -> dict[str, Any]:
+        """Inject latest device context only into Mai_life proactive private planner tasks."""
+        cfg = self.config.mai_life
+        if not self.config.plugin.enabled or not cfg.planner_context_enabled or not cfg.auto_inject_planner:
+            return {"action": "continue"}
+        if cfg.proactive_only_context and not _proactive_task_from_payload(kwargs):
+            return {"action": "continue"}
+
+        payload = kwargs.get("items")
+        if not isinstance(payload, list):
+            payload = kwargs.get("messages")
+        marker_found = False
+        if isinstance(payload, list):
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                parts = item.get("parts")
+                texts: list[str] = []
+                if isinstance(parts, list):
+                    texts.extend(str(part.get("text") or "") for part in parts
+                                 if isinstance(part, dict) and str(part.get("type") or "").lower() == "text")
+                else:
+                    content = item.get("content")
+                    if isinstance(content, str):
+                        texts.append(content)
+                    elif isinstance(content, list):
+                        texts.extend(str(part.get("text") or "") for part in content if isinstance(part, dict))
+                for text in texts:
+                    if "<plugin_proactive_task" in text:
+                        marker_found = True
+                        if not re.search(r'<plugin_proactive_task\b[^>]*plugin_id="maibot-community\.mai-life"[^>]*>', text, flags=re.I):
+                            return {"action": "continue"}
+        if not marker_found and str(kwargs.get("intent") or "") != "mai_life_proactive":
+            return {"action": "continue"}
+
+        session = str(kwargs.get("session_id") or "")
+        now = time.time()
+        cooldown = max(0, min(int(cfg.context_cooldown_seconds), 86400))
+        if cooldown:
+            last = self._last_linked_context_by_session.get(session, 0.0)
+            if now - last < cooldown:
+                return {"action": "continue"}
+        try:
+            status_payload = self._request("/api/v1/status/latest")
+            note = self._latest_text(status_payload, planner=True)
+            if self._append_context(kwargs, note):
+                self._last_linked_context_at = now
+                if session:
+                    self._last_linked_context_by_session[session] = now
+                self.ctx.logger.info("MaiStatus context injected into Mai_life proactive Planner task")
+                return {"action": "continue", "modified_kwargs": kwargs}
+        except Exception as exc:
+            self.ctx.logger.warning("MaiStatus automatic Planner injection skipped: %s", safe(exc, 180))
+        return {"action": "continue"}
+
 
     @Command("mystatus", description="查看个人状态：最新状态、音乐、活动、位置或历史", pattern=r"^/mystatus(?:\s+(?P<action>music|activity|location|history|ping))?\s*$", aliases=["/我的状态"])
     async def command_mystatus(self, **kwargs: Any):
