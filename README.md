@@ -9,38 +9,43 @@
 - `/mystatus history`：近期上报记录
 - `/mystatus ping`：服务健康检查
 - LLM 工具 `maistatus_get_latest`、`maistatus_get_history`
-- LLM 工具 `maistatus_planner_context`：查询主动开场背景
-- Hook `maisaka.planner.before_request`：识别 Mai_life 的主动任务标记后，请求最新状态并自动注入 Planner 上下文
+- LLM 工具 `maistatus_planner_context`
+- Hook `maisaka.planner.before_request`：检测 Mai_life 主动任务后请求最新状态并注入 Planner 上下文
 
 ## Mai_life 主动开聊联动
 
-插件监听 `maisaka.planner.before_request`，只在看到 Host 生成的 `plugin_proactive_task` 标记且 `plugin_id="maibot-community.mai-life"` 时注入状态；普通被动回复默认不会触发。当前主动任务判定基于 Mai_life 1.20.1 的任务标记格式。
+插件监听 `maisaka.planner.before_request`，只有检测到 Host 生成的 `plugin_proactive_task` 标记且插件 ID 为 `maibot-community.mai-life` 时，才考虑注入；普通被动回复不触发。适配基于 Mai_life 1.20.1 的任务标记格式。
 
-自动联动默认开启，可在 WebUI 的「Mai_life 联动」配置节调整：
-- `planner_context_enabled`：总开关
+WebUI「Mai_life 联动」配置：
+- `planner_context_enabled`：联动总开关
 - `auto_inject_planner`：自动注入 Planner 开关
-- `proactive_only_context`：仅在主动任务中请求
-- `context_cooldown_seconds`：按会话冷却，默认 900 秒
-- `max_context_age_hours`：新鲜度参考窗口，默认 24 小时
+- `proactive_only_context`：限制仅用于主动任务
+- `context_cooldown_seconds`：每会话冷却，默认 900 秒
+- `max_context_age_hours`：状态新鲜度参考窗口，默认 24 小时
+- `inject_only_owner`：仅向主人主动任务注入，默认开启
+- `owner_user_id`：主人 QQ 号，默认空
 
-状态 API 请求失败会 fail-open（不阻断 Planner）；冷却期内跳过本次 API 请求。上下文强调该数据是设备上报，不是主人当前发言，麦麦可以忽略不自然的开场线索。
+**要启用仅主人模式，请填写 `owner_user_id`。** 插件在无法确认主动任务目标是主人时会跳过注入，避免把私人状态带给朋友。目标匹配使用 Host 提供的用户 ID 或会话 ID；如果你的 MaiBot 会话 ID 不包含主人 QQ 号，需检查日志/会话格式并调整适配，不能直接关闭安全检查来绕过。
+
+状态请求失败会 fail-open（不阻断 Planner）；冷却期内跳过请求。上下文强调这些内容是设备上报，不是主人刚刚发来的消息。麦麦可忽略不自然的开场线索。
 
 ## 安装和配置
 
-1. 将插件目录放入 MaiBot 的第三方插件目录，重载插件。
-2. 在 WebUI 设置：
+1. 将插件目录放入 MaiBot 第三方插件目录并重载。
+2. WebUI 配置「状态服务器」：
    - `base_url`: `https://maistatus.hhyyyy.cn`
-   - `read_token`: 状态服务器 Bearer Token
-3. 私聊运行 `/mystatus ping` 测试接口。
-4. 当 Mai_life 主动巡检选中主动私聊任务后，检查 MaiStatus 日志是否出现 `MaiStatus context injected into Mai_life proactive Planner task`。
+   - `read_token`: 服务端 Bearer Token
+3. 「Mai_life 联动」中确认 `planner_context_enabled` 和 `auto_inject_planner` 已启用，并填写主人 QQ 号。
+4. 私聊运行 `/mystatus ping`。
+5. 等 Mai_life 主动巡检选中主人后，查看日志是否出现 `MaiStatus context injected into Mai_life proactive Planner task`。
 
 ## 隐私
 
-- 仅使用 GET 请求读取服务端数据。
-- Token 仅配置于本地，不要提交至 Git。
-- 精确坐标默认隐藏，且 Planner 上下文永远不会包含精确经纬度。
-- 插件按会话冷却请求，默认 15 分钟；失败不会阻断主动对话。
-- 只在 Mai_life 主动任务标记命中时注入，不要把私人设备状态转发给群聊或朋友。
+- 只发送 GET 请求读取状态。
+- Token 只配置在 MaiBot 本地，不要提交 Git。
+- 精确坐标默认隐藏，Planner 上下文不会包含精确经纬度。
+- 默认按会话限频 15 分钟；失败不阻断主动对话。
+- 不向群聊或朋友注入主人设备状态。
 
 ## API 契约
 
