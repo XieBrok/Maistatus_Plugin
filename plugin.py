@@ -39,6 +39,7 @@ class LifeLinkSection(PluginConfigBase):
     max_context_age_hours: int = Field(default=24, description="状态有效时间窗口（小时），过期状态不应视为当前事实")
     auto_inject_planner: bool = Field(default=True, description="在 Mai_life 主动任务的 Planner 阶段自动拉取并注入状态")
     inject_only_owner: bool = Field(default=True, description="无法确认主人身份时不注入状态上下文")
+    owner_user_id: str = Field(default="", description="主人 QQ 号，用于校验主动任务目标；开启仅主人模式时建议填写")
 
 
 class Config(PluginConfigBase):
@@ -347,6 +348,17 @@ class MaiStatusPlugin(MaiBotPlugin):
             return {"action": "continue"}
 
         session = str(kwargs.get("session_id") or "")
+        if cfg.inject_only_owner:
+            owner_id = "".join(ch for ch in str(cfg.owner_user_id or "") if ch.isdigit())
+            target_id = str(kwargs.get("user_id") or kwargs.get("target_user_id") or kwargs.get("recipient_id") or "")
+            session_digits = "".join(ch for ch in session if ch.isdigit())
+            # Fail closed unless the hook can match a configured owner identifier against
+            # host-supplied recipient metadata or the private session ID.
+            if not owner_id or not (
+                target_id == owner_id or
+                (session_digits and session_digits.endswith(owner_id))
+            ):
+                return {"action": "continue"}
         now = time.time()
         cooldown = max(0, min(int(cfg.context_cooldown_seconds), 86400))
         if cooldown:
