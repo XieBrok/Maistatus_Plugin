@@ -3,7 +3,7 @@
   "id": "cn.hhyyyy.maistatus",
   "version": "1.2.0",
   "name": "MaiStatus 个人状态",
-  "description": "读取个人状态，并提供 Mai_life 主动 Planner 联动上下文工具。",
+  "description": "读取个人状态，并在 Mai_life 主动 Planner 任务中自动注入隐私受限的状态上下文。",
   "author": {
     "name": "XieBrok",
     "url": "https://github.com/XieBrok"
