@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -15,7 +17,7 @@ class PluginSection(PluginConfigBase):
     __ui_label__ = "插件设置"
     __ui_order__ = 0
     enabled: bool = Field(default=True, description="启用插件")
-    config_version: str = Field(default="1.1.0", description="插件配置版本")
+    config_version: str = Field(default="1.2.0", description="插件配置版本")
 
 
 class ServerSection(PluginConfigBase):
@@ -28,9 +30,19 @@ class ServerSection(PluginConfigBase):
     include_exact_location: bool = Field(default=False, description="允许输出精确坐标（默认关闭）")
 
 
+class LifeLinkSection(PluginConfigBase):
+    __ui_label__ = "Mai_life 联动"
+    __ui_order__ = 2
+    planner_context_enabled: bool = Field(default=True, description="启用 Planner 状态上下文工具")
+    proactive_only_context: bool = Field(default=True, description="状态上下文仅用于 Mai_life 主动开聊，不主动用于普通被动回复")
+    context_cooldown_seconds: int = Field(default=900, description="主动状态查询最小间隔秒数，建议 900")
+    max_context_age_hours: int = Field(default=24, description="状态有效时间窗口（小时），过期状态不应视为当前事实")
+
+
 class Config(PluginConfigBase):
     plugin: PluginSection = Field(default_factory=PluginSection)
     server: ServerSection = Field(default_factory=ServerSection)
+    mai_life: LifeLinkSection = Field(default_factory=LifeLinkSection)
 
 
 def safe(value: Any, max_len: int = 180) -> str:
@@ -41,17 +53,58 @@ def safe(value: Any, max_len: int = 180) -> str:
 
 def format_time(value: Any) -> str:
     try:
-        stamp = int(value) / 1000  # Server uses Unix milliseconds.
+        stamp = int(value) / 1000
         return datetime.fromtimestamp(stamp, tz=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     except (TypeError, ValueError, OverflowError, OSError):
         return safe(value, 60) or "时间未知"
 
 
+def _event_age_hours(value: Any) -> float | None:
+    try:
+        stamp = int(value) / 1000
+        if stamp <= 0:
+            return None
+        return max(0.0, time.time() - stamp) / 3600
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _proactive_task_from_payload(kwargs: dict[str, Any]) -> bool:
+    """Recognize only the structured host-generated Mai_life task marker."""
+    payload = kwargs.get("items")
+    if not isinstance(payload, list):
+        payload = kwargs.get("messages")
+    if not isinstance(payload, list):
+        return False
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        parts = item.get("parts")
+        texts: list[str] = []
+        if isinstance(parts, list):
+            texts.extend(str(part.get("text") or "") for part in parts
+                         if isinstance(part, dict) and str(part.get("type") or "").lower() == "text")
+        else:
+            content = item.get("content")
+            if isinstance(content, str):
+                texts.append(content)
+            elif isinstance(content, list):
+                texts.extend(str(part.get("text") or "") for part in content if isinstance(part, dict))
+        for text in texts:
+            if re.search(r'<plugin_proactive_task\b[^>]*plugin_id="maibot-community\.mai-life"[^>]*>', text, flags=re.I):
+                return True
+    return str(kwargs.get("intent") or "") == "mai_life_proactive"
+
+
 class MaiStatusPlugin(MaiBotPlugin):
     config_model = Config
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._last_linked_context_at = 0.0
+
     async def on_load(self) -> None:
-        self.ctx.logger.info("MaiStatus 插件已加载")
+        self.ctx.logger.info("MaiStatus 插件已加载（Mai_life 联动可按配置启用）")
 
     def _request(self, path: str) -> dict[str, Any]:
         cfg = self.config.server
@@ -63,7 +116,7 @@ class MaiStatusPlugin(MaiBotPlugin):
         req = urllib.request.Request(
             base + path,
             headers={"Authorization": "Bearer " + cfg.read_token.strip(),
-                     "Accept": "application/json", "User-Agent": "MaiStatus-MaiBot/1.1"},
+                     "Accept": "application/json", "User-Agent": "MaiStatus-MaiBot/1.2"},
             method="GET",
         )
         try:
@@ -79,42 +132,50 @@ class MaiStatusPlugin(MaiBotPlugin):
         except urllib.error.URLError as exc:
             raise RuntimeError(f"无法连接服务器：{safe(exc.reason, 100)}") from exc
 
-    def _latest_text(self, payload: dict[str, Any], category: str = "all") -> str:
+    def _latest_text(self, payload: dict[str, Any], category: str = "all", *, planner: bool = False) -> str:
         labels = {"location": "位置", "activity": "活动", "music": "音乐"}
         keys = [category] if category in labels else ["music", "activity", "location"]
-        lines = ["📡 个人状态摘要"]
+        lines = ["【主人设备状态｜来自 MaiStatus API】" if planner else "📡 个人状态摘要"]
         found = False
         for key in keys:
             item = payload.get(key)
             if not isinstance(item, dict):
                 continue
             found = True
-            lines.append(f"\n【{labels[key]}】更新时间：{format_time(item.get('event_time'))}")
+            age = _event_age_hours(item.get("event_time"))
+            freshness = "时间未知" if age is None else (f"{age:.1f} 小时前" if age < 24 else f"约 {age:.0f} 小时前")
+            lines.append(f"\n【{labels[key]}】上报时间：{format_time(item.get('event_time'))}（{freshness}）")
             if key == "music":
                 state = safe(item.get("state"), 30) or "未知"
                 title = safe(item.get("title"), 120) or "未知曲目"
                 artist = safe(item.get("artist"), 100)
-                package = safe(item.get("package"), 100)
                 lines.append(f"播放状态：{state}；曲目：{title}" + (f"；歌手：{artist}" if artist else ""))
-                if package:
-                    lines.append(f"播放器：{package}")
             elif key == "activity":
                 lines.append(f"活动类型代码：{safe(item.get('activity_type'), 20) or '未知'}；置信度：{safe(item.get('confidence'), 8) or '未知'}%")
             elif key == "location":
-                if self.config.server.include_exact_location:
+                if self.config.server.include_exact_location and not planner:
                     lat, lon = item.get("latitude"), item.get("longitude")
                     if lat is not None and lon is not None:
                         lines.append(f"坐标：{safe(lat, 24)}, {safe(lon, 24)}")
                 else:
-                    lines.append("已收到位置上报（精确坐标默认隐藏）")
-                accuracy = item.get("accuracy_meters")
-                if accuracy is not None:
-                    lines.append(f"定位精度约：{safe(accuracy, 20)} 米")
+                    lines.append("收到过位置上报；不向 Planner 提供精确坐标。")
         if not found:
-            lines.append("服务器尚无该类别的状态记录。")
+            lines.append("服务器尚无状态记录。")
         if payload.get("last_event_time"):
-            lines.append(f"\n最近一次上报：{format_time(payload['last_event_time'])}")
-        lines.append("\n隐私提示：位置坐标默认隐藏。")
+            lines.append(f"\n最近一次状态上报：{format_time(payload['last_event_time'])}")
+        if planner:
+            max_age = max(1, int(self.config.mai_life.max_context_age_hours))
+            ages = [_event_age_hours(payload.get(key, {}).get("event_time"))
+                    for key in ("music", "activity", "location") if isinstance(payload.get(key), dict)]
+            if not ages or all(age is None or age > max_age for age in ages):
+                lines.append(f"\n【新鲜度边界】全部或部分状态可能已过期（参考窗口 {max_age} 小时）；不可断言主人此刻仍在做这些事。")
+            lines.append(
+                "\n【Planner 使用规则】这只是设备上报背景，不是主人刚刚发来的消息。"
+                "可以据此形成自然、低压力的开场，但不要逐项播报、不要推断精确行踪。"
+                "只有音乐或活动等线索自然相关时才提及；状态过期、信息空缺或话题不自然时可忽略。"
+            )
+        else:
+            lines.append("\n隐私提示：位置坐标默认隐藏。")
         return "\n".join(lines)
 
     def _history_text(self, payload: dict[str, Any]) -> str:
@@ -146,7 +207,7 @@ class MaiStatusPlugin(MaiBotPlugin):
             lines.append(f"{index}. {when}｜{kind}" + (f"｜{summary}" if summary else ""))
         return "\n".join(lines)
 
-    @Tool("maistatus_get_latest", brief_description="查询用户上传到个人状态服务器的最新音乐、活动和位置状态。")
+    @Tool("maistatus_get_latest", brief_description="查询主人上传到个人状态服务器的最新音乐、活动和位置状态。")
     async def tool_get_latest(self, **kwargs: Any) -> dict[str, Any]:
         del kwargs
         try:
@@ -170,11 +231,39 @@ class MaiStatusPlugin(MaiBotPlugin):
             params: dict[str, Any] = {"limit": limit}
             if event_type in {"music", "activity", "location"}:
                 params["event_type"] = event_type
-            payload = self._request("/api/v1/events?" + urllib.parse.urlencode(params))
-            return {"content": self._history_text(payload)}
+            return {"content": self._history_text(self._request("/api/v1/events?" + urllib.parse.urlencode(params)))}
         except Exception as exc:
             self.ctx.logger.warning("MaiStatus history query failed: %s", exc)
             return {"content": "查询历史记录失败：" + safe(exc, 180)}
+
+    @Tool(
+        "maistatus_planner_context",
+        brief_description="供 Mai_life 主动私聊 Planner 获取主人最近上报的音乐/活动状态；仅在准备主动找主人时调用。",
+        detailed_description=(
+            "用于 Mai_life 与 MaiStatus 的主动聊天联动。仅当本轮是 Mai_life 已选择的主动私聊任务，"
+            "且确实需要一个自然开场线索时调用。返回主人设备近期状态和新鲜度边界。"
+            "不要每次普通回复调用；不要把旧状态说成实时事实；不要向群聊或其他朋友泄露；"
+            "精确位置永远不进入此工具返回结果。无关或不自然时可以忽略状态。"
+        ),
+    )
+    async def tool_planner_context(self, **kwargs: Any) -> dict[str, Any]:
+        del kwargs
+        cfg = self.config.mai_life
+        if not cfg.planner_context_enabled:
+            return {"content": "MaiStatus 的 Planner 联动工具已关闭。"}
+        now = time.time()
+        cooldown = max(0, min(int(cfg.context_cooldown_seconds), 86400))
+        if cooldown and now - self._last_linked_context_at < cooldown:
+            remain = int(cooldown - (now - self._last_linked_context_at))
+            return {"content": f"状态上下文处于冷却中，约 {remain} 秒后可再次请求。"}
+        try:
+            payload = self._request("/api/v1/status/latest")
+            result = self._latest_text(payload, planner=True)
+            self._last_linked_context_at = now
+            return {"content": result}
+        except Exception as exc:
+            self.ctx.logger.warning("MaiStatus Planner context query failed: %s", exc)
+            return {"content": "状态上下文暂时不可用：" + safe(exc, 180)}
 
     @Command("mystatus", description="查看个人状态：最新状态、音乐、活动、位置或历史", pattern=r"^/mystatus(?:\s+(?P<action>music|activity|location|history|ping))?\s*$", aliases=["/我的状态"])
     async def command_mystatus(self, **kwargs: Any):
