@@ -110,6 +110,12 @@ class MaiStatusPlugin(MaiBotPlugin):
     async def on_load(self) -> None:
         self.ctx.logger.info("MaiStatus 插件已加载（Mai_life 联动可按配置启用）")
 
+    async def on_unload(self) -> None:
+        """Release plugin-owned state when MaiBot unloads or reloads this plugin."""
+        self._last_linked_context_by_session.clear()
+        self._last_linked_context_at = 0.0
+        self.ctx.logger.info("MaiStatus 插件已卸载")
+
     def _request(self, path: str) -> dict[str, Any]:
         cfg = self.config.server
         base = cfg.base_url.strip().rstrip("/")
