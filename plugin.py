@@ -311,7 +311,8 @@ class MaiStatusPlugin(MaiBotPlugin):
         cfg = self.config.mai_life
         if not self.config.plugin.enabled or not cfg.planner_context_enabled or not cfg.auto_inject_planner:
             return {"action": "continue"}
-        if cfg.proactive_only_context and not _proactive_task_from_payload(kwargs):
+        is_proactive = _proactive_task_from_payload(kwargs)
+        if cfg.proactive_only_context and not is_proactive:
             return {"action": "continue"}
 
         payload = kwargs.get("items")
@@ -339,6 +340,10 @@ class MaiStatusPlugin(MaiBotPlugin):
                         if not re.search(r'<plugin_proactive_task\b[^>]*plugin_id="maibot-community\.mai-life"[^>]*>', text, flags=re.I):
                             return {"action": "continue"}
         if not marker_found and str(kwargs.get("intent") or "") != "mai_life_proactive":
+            return {"action": "continue"}
+        # Do not inject into group-like planner sessions if the host exposes chat type.
+        chat_type = str(kwargs.get("chat_type") or kwargs.get("session_type") or "").lower()
+        if chat_type in {"group", "guild", "channel"}:
             return {"action": "continue"}
 
         session = str(kwargs.get("session_id") or "")
