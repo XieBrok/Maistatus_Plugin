@@ -116,6 +116,12 @@ class MaiStatusPlugin(MaiBotPlugin):
         self._last_linked_context_at = 0.0
         self.ctx.logger.info("MaiStatus 插件已卸载")
 
+    async def on_config_update(self) -> None:
+        """Handle plugin configuration updates."""
+        self._last_linked_context_by_session.clear()
+        self._last_linked_context_at = 0.0
+        self.ctx.logger.info("MaiStatus 插件配置已更新")
+
     def _request(self, path: str) -> dict[str, Any]:
         cfg = self.config.server
         base = cfg.base_url.strip().rstrip("/")
