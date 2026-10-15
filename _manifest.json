@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "cn.hhyyyy.maistatus",
-  "version": "1.2.0",
+  "version": "1.2.2",
   "name": "MaiStatus 个人状态",
   "description": "读取个人状态，并在 Mai_life 主动 Planner 任务中自动注入隐私受限的状态上下文。",
   "author": {
