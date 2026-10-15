@@ -22,12 +22,12 @@ jobs:
           mkdir -p dist
           cp plugin.py _manifest.json README.md dist/
           cd dist
-          zip ../Maistatus_Plugin-v1.2.1.zip _manifest.json plugin.py README.md
-          unzip -l ../Maistatus_Plugin-v1.2.1.zip
-          unzip -Z1 ../Maistatus_Plugin-v1.2.1.zip | grep -qx '_manifest.json'
+          zip ../Maistatus_Plugin-v1.2.2.zip _manifest.json plugin.py README.md
+          unzip -l ../Maistatus_Plugin-v1.2.2.zip
+          unzip -Z1 ../Maistatus_Plugin-v1.2.2.zip | grep -qx '_manifest.json'
       - uses: actions/upload-artifact@v4
         with:
-          name: Maistatus_Plugin-v1.2.1
-          path: Maistatus_Plugin-v1.2.1.zip
+          name: Maistatus_Plugin-v1.2.2
+          path: Maistatus_Plugin-v1.2.2.zip
           if-no-files-found: error
           retention-days: 30
