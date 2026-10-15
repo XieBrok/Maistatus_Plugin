@@ -408,8 +408,6 @@ class MaiStatusPlugin(MaiBotPlugin):
                 text = self._latest_text(data, action or "all")
         except Exception as exc:
             text = "❌ MaiStatus 查询失败：" + safe(exc, 180)
-        if stream_id:
-            await self.ctx.send.text(text, stream_id)
         return True, text, 2
 
 
